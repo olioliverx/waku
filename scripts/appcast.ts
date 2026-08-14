@@ -5,22 +5,27 @@
 // Usage:
 //   bun scripts/appcast.ts <updates-dir>
 //
-// <updates-dir> holds the packaged archives (e.g. Waku-0.2.0.zip) plus any
-// older archives so Sparkle can build binary deltas. appcast.xml is written
-// into that directory. The private EdDSA key is read from SPARKLE_PRIVATE_KEY
-// when set, otherwise from the login keychain (see RELEASING.md).
+// <updates-dir> holds the packaged archives (e.g. Waku-0.2.0.zip). appcast.xml
+// is written into that directory. The private EdDSA key is read from
+// SPARKLE_PRIVATE_KEY when set, otherwise from the login keychain (see
+// RELEASING.md).
 //
 // Env overrides:
 //   SPARKLE_BIN                dir containing the Sparkle tools
 //   SPARKLE_PRIVATE_KEY        EdDSA private key (CI; otherwise the keychain)
 //   WAKU_DOWNLOAD_URL_PREFIX   base URL for enclosure links
 import { $ } from "bun";
-import { existsSync, readdirSync } from "node:fs";
+import { chmodSync, existsSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const projectRoot = resolve(import.meta.dir, "..");
 
-export const defaultDownloadUrlPrefix = "https://releases.waku.sh/";
+// Enclosure links point at this repository's GitHub release assets;
+// `release.ts` appends the version tag (v<version>/) before calling
+// `generateAppcast`.
+export const defaultDownloadUrlPrefix =
+  "https://github.com/olioliverx/waku/releases/download/";
 
 /** Locate Sparkle's `generate_appcast`: SPARKLE_BIN first, then the pinned
  *  distribution scripts/bundle.sh caches under .waku-cache, then PATH. */
@@ -63,19 +68,25 @@ export async function generateAppcast(
   // served from the same origin. The notes prefix makes generate_appcast emit
   // <sparkle:releaseNotesLink> for any notes file matching an archive name.
   const privateKey = process.env.SPARKLE_PRIVATE_KEY?.trim();
-  const command = [
-    generator,
+  const baseArgs = [
     "--download-url-prefix",
     downloadUrlPrefix,
     "--release-notes-url-prefix",
     downloadUrlPrefix,
-    ...(privateKey ? ["--ed-key-file", "-"] : []),
-    updatesDir,
   ];
   if (privateKey) {
-    await $`${command}`.stdin(privateKey);
+    // Bun's shell API cannot pipe stdin into a spawned command, so the key
+    // goes to a process-private 0600 temp file that is removed afterwards.
+    const keyFile = join(tmpdir(), `waku-sparkle-key-${process.pid}.txt`);
+    await Bun.write(keyFile, privateKey);
+    chmodSync(keyFile, 0o600);
+    try {
+      await $`${generator} ${baseArgs} --ed-key-file ${keyFile} ${updatesDir}`;
+    } finally {
+      rmSync(keyFile, { force: true });
+    }
   } else {
-    await $`${command}`;
+    await $`${generator} ${baseArgs} ${updatesDir}`;
   }
   console.log(`Wrote ${join(updatesDir, "appcast.xml")}`);
 }

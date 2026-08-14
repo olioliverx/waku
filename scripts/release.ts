@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { defaultDownloadUrlPrefix, generateAppcast } from "./appcast";
+import { generateAppcast } from "./appcast";
 import { extractReleaseNotes } from "./changelog";
 
 const appName = "Waku";
@@ -22,20 +22,21 @@ const packageName = "waku";
 const defaultNotaryProfile = "NOTARY";
 const projectRoot = resolve(import.meta.dir, "..");
 
-const help = `Build, notarize, and publish a production release of Waku.
+const help = `Build, notarize, and stage a production release of Waku.
 
 Usage:
   bun run release [options]
 
 The default run builds a signed, notarized DMG, packages the Sparkle update
-archive, regenerates the signed appcast (with binary deltas against recent
-releases), and uploads everything to Cloudflare R2 — the bucket behind
-https://releases.waku.sh. One-time setup lives in RELEASING.md.
+archive, regenerates the signed appcast, and writes everything under dist/.
+Publishing happens on GitHub: pushing a v<version> tag runs the Release
+workflow, which attaches these artifacts to a draft GitHub release served at
+https://github.com/olioliverx/waku/releases/latest/download/appcast.xml.
+One-time setup lives in RELEASING.md.
 
 Options:
   --local                       Build, notarize, and write the DMG + zip
-                                without publishing to R2
-  --force                       Publish even if this version is already in R2
+                                without publishing
   --output <path>               DMG output path (default: dist/Waku-<version>.dmg)
   --signing-identity <name>     Developer ID Application identity selector
                                 (or WAKU_SIGNING_IDENTITY; required unless --adhoc)
@@ -54,19 +55,17 @@ Environment:
   WAKU_SIGNING_IDENTITY         Developer ID Application identity selector
   WAKU_ANALYTICS_ENDPOINT       analytics endpoint embedded at build time
   WAKU_ANALYTICS_WEBSITE_ID     analytics website ID embedded at build time
-  WAKU_R2_REMOTE                rclone remote name (default: r2)
-  WAKU_R2_BUCKET                R2 bucket name (default: waku-releases)
-  WAKU_DOWNLOAD_URL_PREFIX      base URL served by the bucket
-                                (default: ${defaultDownloadUrlPrefix})
-  WAKU_HISTORY_COUNT            prior archives pulled for deltas (default: 15)
-  WAKU_NO_HISTORY=1             skip pulling prior archives (no deltas)
+  WAKU_DOWNLOAD_URL_PREFIX      base URL used for appcast enclosure links
+                                (default: the GitHub download URL for this
+                                version's tag, i.e.
+                                https://github.com/olioliverx/waku/releases/download/v<version>/)
   SPARKLE_BIN                   Sparkle tools dir (default: the bundle.sh cache
                                 under .waku-cache/sparkle)
   SPARKLE_PRIVATE_KEY           Sparkle EdDSA private key (otherwise keychain)
 
 Before the first production release:
   xcrun notarytool store-credentials NOTARY   # notarization credentials
-  See RELEASING.md for the R2 bucket, rclone remote, and Sparkle key setup.
+  See RELEASING.md for signing and Sparkle key setup.
 `;
 
 const { values } = parseArgs({
@@ -74,7 +73,6 @@ const { values } = parseArgs({
   options: {
     adhoc: { type: "boolean" },
     "build-number": { type: "string" },
-    force: { type: "boolean" },
     help: { type: "boolean", short: "h" },
     local: { type: "boolean" },
     "notary-profile": { type: "string" },
@@ -145,21 +143,15 @@ const explicitBuildNumber =
 const analyticsEndpoint = process.env.WAKU_ANALYTICS_ENDPOINT?.trim();
 const analyticsWebsiteId = process.env.WAKU_ANALYTICS_WEBSITE_ID?.trim();
 const localOnly = values.local ?? false;
-const force = values.force ?? false;
-// Publishing requires a Developer ID-signed, notarized DMG, so the flags that
-// weaken signing imply --local.
+// A stable-channel release requires a Developer ID-signed, notarized DMG, so
+// the flags that weaken signing imply --local.
 const publishing = !localOnly && !adhoc && !skipNotarize;
-
-const r2Remote = process.env.WAKU_R2_REMOTE ?? "r2";
-const r2Bucket = process.env.WAKU_R2_BUCKET ?? "waku-releases";
-const r2Destination = `${r2Remote}:${r2Bucket}`;
-// A bucket-scoped R2 API token cannot create buckets, and rclone otherwise
-// checks/creates one before writing. The bucket must already exist.
-const rcloneFlags = ["--s3-no-check-bucket"];
+// Publishing happens on GitHub: pushing a v<version> tag runs the Release
+// workflow. Appcast enclosure links therefore point at this version's GitHub
+// release assets unless WAKU_DOWNLOAD_URL_PREFIX overrides them.
+const githubDownloadUrlPrefix = `https://github.com/olioliverx/waku/releases/download/`;
 const downloadUrlPrefix =
-  process.env.WAKU_DOWNLOAD_URL_PREFIX ?? defaultDownloadUrlPrefix;
-const historyCount = Number(process.env.WAKU_HISTORY_COUNT ?? "15");
-const skipHistory = process.env.WAKU_NO_HISTORY === "1";
+  process.env.WAKU_DOWNLOAD_URL_PREFIX ?? githubDownloadUrlPrefix;
 
 if (adhoc && values["signing-identity"]) {
   throw new Error("Use either --adhoc or --signing-identity, not both.");
@@ -174,12 +166,10 @@ if (explicitBuildNumber && !/^\d+(?:\.\d+){0,2}$/.test(explicitBuildNumber)) {
     "--build-number must contain one to three period-separated integers.",
   );
 }
-if (!Number.isSafeInteger(historyCount) || historyCount < 0) {
-  throw new Error("WAKU_HISTORY_COUNT must be a non-negative integer.");
-}
-if (!values["skip-build"] && (!analyticsEndpoint || !analyticsWebsiteId)) {
+if (!values["skip-build"] && (!analyticsEndpoint !== !analyticsWebsiteId)) {
   throw new Error(
-    "Set WAKU_ANALYTICS_ENDPOINT and WAKU_ANALYTICS_WEBSITE_ID before building a release.",
+    "Set both WAKU_ANALYTICS_ENDPOINT and WAKU_ANALYTICS_WEBSITE_ID, or neither. " +
+      "Leaving both unset disables analytics in the release build.",
   );
 }
 
@@ -197,9 +187,6 @@ for (const tool of [
 if (!adhoc && !skipNotarize) {
   requireTool("xcrun");
   requireTool("spctl");
-}
-if (publishing) {
-  requireTool("rclone");
 }
 
 process.chdir(projectRoot);
@@ -219,6 +206,8 @@ const shortVersion = version.split("-", 1)[0];
 const buildNumber = explicitBuildNumber ?? derivedBuildNumber(version);
 const dmgName = `${appName}-${version}.dmg`;
 const zipName = `${appName}-${version}.zip`;
+// Appcast enclosure links point at this version's GitHub release assets.
+const appcastUrlPrefix = `${downloadUrlPrefix}v${version}/`;
 if (publishing && version !== shortVersion) {
   throw new Error(
     `Version ${version} is a prerelease, and the appcast serves a single ` +
@@ -228,33 +217,6 @@ if (publishing && version !== shortVersion) {
 if (!publishing) {
   const reason = localOnly ? "--local" : adhoc ? "--adhoc" : "--skip-notarize";
   console.log(`Building without publishing (${reason}).`);
-}
-
-// Fail before the long build: the bucket must exist and the version must be
-// new. An unreachable remote should not surface after notarization.
-if (publishing) {
-  logStep(`Checking ${r2Destination}`);
-  const listing = await $`rclone lsf ${r2Destination} ${rcloneFlags}`
-    .quiet()
-    .nothrow();
-  if (listing.exitCode !== 0) {
-    const detail = listing.stderr.toString().trim();
-    if (detail.includes("directory not found")) {
-      throw new Error(
-        `R2 bucket "${r2Bucket}" does not exist on remote "${r2Remote}". ` +
-          "Create it in the Cloudflare dashboard and attach the " +
-          "releases.waku.sh custom domain (see RELEASING.md), then re-run.",
-      );
-    }
-    throw new Error(`Cannot reach ${r2Destination}: ${detail}`);
-  }
-  const published = listing.stdout.toString().split("\n").filter(Boolean);
-  if (published.includes(zipName) && !force) {
-    throw new Error(
-      `${zipName} is already published — bump the version in Cargo.toml, ` +
-        "or pass --force to re-release it.",
-    );
-  }
 }
 
 const outputPath = resolve(
@@ -556,55 +518,12 @@ try {
   logStep(`Packaging ${zipName}`);
   await $`ditto -c -k --keepParent ${appBundle} ${zipPath}`;
 
-  // A clean staging directory holds this release plus, when publishing, the
-  // recent history generate_appcast needs to build binary deltas.
+  // A clean staging directory holds this release for generate_appcast. GitHub
+  // hosts every release's assets, so no history is pulled; updates are full
+  // downloads rather than binary deltas.
   const updatesDirectory = join(projectRoot, "dist", "updates");
   await rm(updatesDirectory, { force: true, recursive: true });
   await mkdir(updatesDirectory, { recursive: true });
-
-  if (publishing && !skipHistory) {
-    logStep(
-      `Selecting the ${historyCount} most recent archives from R2 (for deltas)`,
-    );
-    type RemoteFile = { Name: string; IsDir: boolean };
-    const remoteFiles = JSON.parse(
-      await $`rclone lsjson ${r2Destination} ${rcloneFlags} --files-only --include ${"*.zip"} --include ${"appcast.xml"}`
-        .quiet()
-        .text(),
-    ) as RemoteFile[];
-    const archivePattern = new RegExp(`^${appName}-.+\\.zip$`);
-    const archiveVersion = (name: string) =>
-      name.slice(appName.length + 1, -".zip".length);
-    const versionOrder = new Intl.Collator("en", { numeric: true });
-    const recentArchives = remoteFiles
-      .filter(
-        ({ Name, IsDir }) =>
-          !IsDir && archivePattern.test(Name) && Name !== zipName,
-      )
-      .sort((a, b) =>
-        versionOrder.compare(archiveVersion(b.Name), archiveVersion(a.Name)),
-      )
-      .slice(0, historyCount)
-      .map(({ Name }) => Name);
-    const historyFiles = [
-      ...(remoteFiles.some(({ Name }) => Name === "appcast.xml")
-        ? ["appcast.xml"]
-        : []),
-      ...recentArchives,
-    ];
-    if (historyFiles.length > 0) {
-      const includeFlags = historyFiles.flatMap((name) => [
-        "--include",
-        `/${name}`,
-      ]);
-      await $`rclone copy ${r2Destination} ${updatesDirectory} ${rcloneFlags} ${includeFlags}`;
-    }
-    console.log(
-      recentArchives.length > 0
-        ? `Pulled ${recentArchives.join(", ")}`
-        : "No prior archives found.",
-    );
-  }
 
   await $`ditto ${zipPath} ${join(updatesDirectory, zipName)}`;
 
@@ -630,27 +549,18 @@ try {
   }
 
   logStep("Generating the signed appcast");
-  await generateAppcast(updatesDirectory, downloadUrlPrefix);
+  await generateAppcast(updatesDirectory, appcastUrlPrefix);
   await $`ditto ${join(updatesDirectory, "appcast.xml")} ${join(projectRoot, "dist", "appcast.xml")}`;
 
-  if (publishing) {
-    // Archives and the DMG are immutable once published → cache forever.
-    // appcast.xml changes every release → keep it fresh so update checks are
-    // never served stale.
-    const immutableCache =
-      "Cache-Control: public, max-age=31536000, immutable";
-    logStep(`Uploading ${dmgName} to ${r2Destination}`);
-    await $`rclone copyto ${outputPath} ${`${r2Destination}/${dmgName}`} ${rcloneFlags} --header-upload ${immutableCache} --progress`;
-    logStep(`Uploading update archives to ${r2Destination}`);
-    await $`rclone copy ${updatesDirectory} ${r2Destination} ${rcloneFlags} --exclude ${"appcast.xml"} --exclude ${"old_updates/**"} --header-upload ${immutableCache} --progress`;
-    logStep("Uploading appcast.xml");
-    await $`rclone copyto ${join(updatesDirectory, "appcast.xml")} ${`${r2Destination}/appcast.xml`} ${rcloneFlags} --header-upload ${"Cache-Control: public, max-age=300, must-revalidate"}`;
-
-    console.log(`\nWaku ${version} (build ${buildNumber}) is live:`);
-    console.log(`  download : ${downloadUrlPrefix}${dmgName}`);
-    console.log(`  update   : ${downloadUrlPrefix}${zipName}`);
-    console.log(`  feed     : ${downloadUrlPrefix}appcast.xml`);
-  }
+  console.log(`\nWaku ${version} (build ${buildNumber}) artifacts:`);
+  console.log(`  dmg      : ${outputPath}`);
+  console.log(`  zip      : ${zipPath}`);
+  console.log(`  appcast  : ${join(projectRoot, "dist", "appcast.xml")}`);
+  console.log(
+    `\nPublish by pushing a v${version} tag — the Release workflow attaches ` +
+      "these artifacts to a draft GitHub release, and the appcast is served " +
+      "at https://github.com/olioliverx/waku/releases/latest/download/appcast.xml",
+  );
 
   console.log(`\nDMG ready: ${outputPath}`);
   console.log(`ZIP ready: ${zipPath}`);
