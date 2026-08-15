@@ -295,6 +295,24 @@ fn agent_arguments(
             push(&mut args, "--profile");
             push(&mut args, "headless");
         }
+        ProviderKind::Droid => {
+            // Exec's JSON output keeps the generated message parseable, and
+            // `low` autonomy still allows the read-only inspection a commit
+            // summary needs without surfacing permission prompts.
+            push(&mut args, "exec");
+            push(&mut args, "--output-format");
+            push(&mut args, "json");
+            push(&mut args, "--auto");
+            push(&mut args, "low");
+            if let Some(model) = model {
+                push(&mut args, "--model");
+                push(&mut args, model);
+            }
+            if let Some(effort) = reasoning_effort {
+                push(&mut args, "--reasoning-effort");
+                push(&mut args, effort);
+            }
+        }
         ProviderKind::OpenCode => {
             push(&mut args, "run");
             push(&mut args, "--pure");
@@ -739,6 +757,13 @@ mod tests {
                 }
                 ProviderKind::DeepSeek => {
                     assert!(has_pair(&args, "--profile", "headless"));
+                }
+                ProviderKind::Droid => {
+                    assert_eq!(args.first().and_then(|arg| arg.to_str()), Some("exec"));
+                    assert!(has_pair(&args, "--output-format", "json"));
+                    assert!(has_pair(&args, "--auto", "low"));
+                    assert!(has_pair(&args, "--model", "model"));
+                    assert!(has_pair(&args, "--reasoning-effort", "low"));
                 }
                 ProviderKind::Grok => {
                     assert!(has_pair(&args, "--single", prompt));

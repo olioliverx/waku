@@ -5,6 +5,7 @@ mod claude;
 mod codex;
 mod computer_use;
 mod deepseek;
+mod droid;
 mod opencode;
 mod pi;
 mod support;
@@ -198,6 +199,9 @@ pub fn start(
             Arc::new(acp::AcpDriver::start(provider, options, events)?)
         }
         ProviderKind::DeepSeek => Arc::new(deepseek::DeepSeekDriver::start(options, events)?),
+        // Droid serves a newline-delimited JSON-RPC session on stdio, which is
+        // what exposes interactive permission requests and queued steering.
+        ProviderKind::Droid => Arc::new(droid::DroidDriver::start(options, events)?),
         // OpenCode's own server is its real API, and it is what exposes
         // interactive permission requests.
         ProviderKind::OpenCode => Arc::new(opencode::OpenCodeDriver::start(options, events)?),

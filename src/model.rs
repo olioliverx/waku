@@ -13,18 +13,20 @@ pub enum ProviderKind {
     Codex,
     Cursor,
     DeepSeek,
+    Droid,
     OpenCode,
     Grok,
     Pi,
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Amp,
         Self::Claude,
         Self::Codex,
         Self::Cursor,
         Self::DeepSeek,
+        Self::Droid,
         Self::OpenCode,
         Self::Grok,
         Self::Pi,
@@ -37,6 +39,7 @@ impl ProviderKind {
             Self::Codex => "codex",
             Self::Cursor => "cursor",
             Self::DeepSeek => "deepseek",
+            Self::Droid => "droid",
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
             Self::Pi => "pi",
@@ -50,6 +53,7 @@ impl ProviderKind {
             Self::Codex => "Codex CLI",
             Self::Cursor => "Cursor CLI",
             Self::DeepSeek => "DeepSeek Harness",
+            Self::Droid => "Factory Droid",
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok Build",
             Self::Pi => "Pi",
@@ -63,6 +67,7 @@ impl ProviderKind {
             Self::Codex => "Codex",
             Self::Cursor => "Cursor",
             Self::DeepSeek => "DeepSeek",
+            Self::Droid => "Droid",
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok",
             Self::Pi => "Pi",
@@ -78,6 +83,7 @@ impl ProviderKind {
             // shared by other CLIs. The backward-compatible alias is unambiguous.
             Self::Cursor => "cursor-agent",
             Self::DeepSeek => "dsh",
+            Self::Droid => "droid",
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
             Self::Pi => "pi",
@@ -115,7 +121,13 @@ impl ProviderKind {
     pub fn supports_model_discovery(self) -> bool {
         matches!(
             self,
-            Self::Codex | Self::Cursor | Self::DeepSeek | Self::OpenCode | Self::Grok | Self::Pi
+            Self::Codex
+                | Self::Cursor
+                | Self::DeepSeek
+                | Self::Droid
+                | Self::OpenCode
+                | Self::Grok
+                | Self::Pi
         )
     }
 }
@@ -151,6 +163,9 @@ pub enum ProviderResumeCursor {
     DeepSeek {
         session_id: String,
     },
+    Droid {
+        session_id: String,
+    },
     Grok {
         session_id: String,
     },
@@ -178,6 +193,7 @@ impl ProviderResumeCursor {
                 fork_context: None,
             },
             ProviderKind::DeepSeek => Self::DeepSeek { session_id: id },
+            ProviderKind::Droid => Self::Droid { session_id: id },
             ProviderKind::OpenCode => Self::OpenCode { session_id: id },
             ProviderKind::Grok => Self::Grok { session_id: id },
             ProviderKind::Pi => Self::Pi {
@@ -194,6 +210,7 @@ impl ProviderResumeCursor {
             Self::Codex { .. } => ProviderKind::Codex,
             Self::Cursor { .. } => ProviderKind::Cursor,
             Self::DeepSeek { .. } => ProviderKind::DeepSeek,
+            Self::Droid { .. } => ProviderKind::Droid,
             Self::OpenCode { .. } => ProviderKind::OpenCode,
             Self::Grok { .. } => ProviderKind::Grok,
             Self::Pi { .. } => ProviderKind::Pi,
@@ -206,6 +223,7 @@ impl ProviderResumeCursor {
             Self::Claude { session_id, .. }
             | Self::Cursor { session_id, .. }
             | Self::DeepSeek { session_id }
+            | Self::Droid { session_id }
             | Self::OpenCode { session_id }
             | Self::Grok { session_id }
             | Self::Pi { session_id, .. } => session_id,

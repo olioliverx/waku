@@ -314,7 +314,7 @@ fn perform_provider_rewind(
             )?;
             Ok((Some(cursor), None, None))
         }
-        ProviderKind::Codex | ProviderKind::DeepSeek | ProviderKind::Pi => {
+        ProviderKind::Codex | ProviderKind::DeepSeek | ProviderKind::Pi | ProviderKind::Droid => {
             let mut prepared_driver = None;
             let driver = if let Some(driver) = request.driver.as_ref() {
                 driver.clone()
@@ -490,6 +490,19 @@ fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedRes
                     anyhow::bail!(tr!(
                         "errors.provider_native_session_unavailable",
                         provider = "DeepSeek Harness"
+                    ));
+                }
+                let (cursor, prepared_driver) = fork_response_with_driver(&mut request)?;
+                Ok((cursor, None, prepared_driver))
+            }
+            ProviderKind::Droid => {
+                if !matches!(
+                    request.source.provider_cursor.as_ref(),
+                    Some(ProviderResumeCursor::Droid { .. })
+                ) {
+                    anyhow::bail!(tr!(
+                        "errors.provider_native_session_unavailable",
+                        provider = "Factory Droid"
                     ));
                 }
                 let (cursor, prepared_driver) = fork_response_with_driver(&mut request)?;

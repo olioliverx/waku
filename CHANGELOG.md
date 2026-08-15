@@ -16,6 +16,8 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+- Add Factory Droid provider
+
 ## [0.0.13]
 
 - Add DeepSeek Harness provider

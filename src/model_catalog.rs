@@ -69,6 +69,10 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         // Harness reports its account/configuration-specific catalog from its
         // Host. An invented fallback would make unavailable routes selectable.
         ProviderKind::DeepSeek => Vec::new(),
+        // Droid's catalog is account-specific (model tiers vary by plan), so a
+        // snapshot of the CLI's advertised models only fills the picker until
+        // discovery reports the real roster.
+        ProviderKind::Droid => droid_fallback_models(),
         ProviderKind::OpenCode => Vec::new(),
         ProviderKind::Grok => {
             vec![ProviderModel::new("grok-build", "Grok Build").default()]
@@ -114,6 +118,7 @@ pub fn discover_catalog(
         ProviderKind::Claude => (Vec::new(), None),
         ProviderKind::Cursor => (discover_cursor_models(binary), None),
         ProviderKind::DeepSeek => discover_deepseek_catalog(binary),
+        ProviderKind::Droid => (discover_droid_models(binary), None),
         ProviderKind::OpenCode => (discover_opencode_models(binary), None),
         ProviderKind::Grok => (discover_grok_models(binary), None),
         ProviderKind::Pi => (discover_pi_models(binary), None),
@@ -250,6 +255,174 @@ fn discover_opencode_models(binary: &Path) -> Vec<ProviderModel> {
         return Vec::new();
     };
     parse_opencode_models(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The CLI's advertised catalog, matching `droid exec --help` "Available
+/// Models" as of Droid 0.196.0. Discovery replaces it with the account roster
+/// returned by `droid.initialize_session`.
+fn droid_fallback_models() -> Vec<ProviderModel> {
+    [
+        ("auto", "Auto Model"),
+        ("claude-fable-5", "Fable 5"),
+        ("claude-opus-5", "Opus 5"),
+        ("claude-opus-5-fast", "Opus 5 Fast Mode"),
+        ("claude-opus-4-8", "Opus 4.8"),
+        ("claude-opus-4-8-fast", "Opus 4.8 Fast Mode"),
+        ("claude-opus-4-7", "Opus 4.7"),
+        ("claude-opus-4-6", "Opus 4.6"),
+        ("claude-opus-4-5-20251101", "Opus 4.5"),
+        ("claude-sonnet-5", "Sonnet 5"),
+        ("claude-sonnet-4-6", "Sonnet 4.6"),
+        ("claude-sonnet-4-5-20250929", "Sonnet 4.5"),
+        ("claude-haiku-4-5-20251001", "Haiku 4.5"),
+        ("gpt-5.6-sol", "GPT-5.6 Sol"),
+        ("gpt-5.6-terra", "GPT-5.6 Terra"),
+        ("gpt-5.6-luna", "GPT-5.6 Luna"),
+        ("gpt-5.5", "GPT-5.5"),
+        ("gpt-5.5-fast", "GPT-5.5 Fast Mode"),
+        ("gpt-5.5-pro", "GPT-5.5 Pro"),
+        ("gpt-5.4", "GPT-5.4"),
+        ("gpt-5.4-fast", "GPT-5.4 Fast Mode"),
+        ("gpt-5.4-mini", "GPT-5.4 Mini"),
+        ("gpt-5.4-mini-fast", "GPT-5.4 Mini Fast Mode"),
+        ("gpt-5.3-codex", "GPT-5.3-Codex"),
+        ("gpt-5.3-codex-fast", "GPT-5.3-Codex Fast Mode"),
+        ("gpt-5.2", "GPT-5.2"),
+        ("gemini-3.1-pro-preview", "Gemini 3.1 Pro"),
+        ("gemini-3.6-flash", "Gemini 3.6 Flash"),
+        ("gemini-3.5-flash", "Gemini 3.5 Flash"),
+        ("gemini-3-flash-preview", "Gemini 3 Flash"),
+        ("inkling", "Inkling (Droid Core)"),
+        ("glm-5.2", "GLM-5.2 (Droid Core)"),
+        ("glm-5.2-fast", "GLM-5.2 Fast (Droid Core)"),
+        ("kimi-k3", "Kimi K3 (Droid Core)"),
+        ("kimi-k2.7-code", "Kimi K2.7 Code (Droid Core)"),
+        ("kimi-k2.6", "Kimi K2.6 (Droid Core)"),
+        ("nemotron-3-ultra", "Nemotron 3 Ultra (Droid Core)"),
+        (
+            "deepseek-v4-flash-0731",
+            "DeepSeek V4 Flash 0731 (Droid Core)",
+        ),
+        ("deepseek-v4-pro", "DeepSeek V4 Pro (Droid Core)"),
+    ]
+    .into_iter()
+    .map(|(id, name)| {
+        let mut model = ProviderModel::new(id, name);
+        if id == "claude-opus-5" {
+            model.is_default = true;
+        }
+        model
+    })
+    .collect()
+}
+
+/// Droid reports the account-specific model roster in the
+/// `droid.initialize_session` result, so discovery opens one short-lived
+/// stream-jsonrpc session and reads `availableModels`.
+fn discover_droid_models(binary: &Path) -> Vec<ProviderModel> {
+    let mut command = crate::command_env::command(binary);
+    let command = command
+        .args([
+            "exec",
+            "--input-format",
+            "stream-jsonrpc",
+            "--output-format",
+            "stream-jsonrpc",
+            "--auto",
+            "low",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let Ok(mut child) = crate::command_env::spawn(command) else {
+        return Vec::new();
+    };
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        return Vec::new();
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        return Vec::new();
+    };
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                let _ = tx.send(value);
+            }
+        }
+    });
+
+    let request = json!({
+        "jsonrpc": "2.0",
+        "factoryApiVersion": "1.0.0",
+        "type": "request",
+        "id": "waku-models",
+        "method": "droid.initialize_session",
+        "params": {
+            "machineId": "waku",
+            "cwd": std::env::current_dir().map(|cwd| cwd.to_string_lossy().into_owned()).unwrap_or_default(),
+        },
+    });
+    let models = if write_json_line(&mut stdin, &request).is_ok()
+        && let Some(response) = recv_droid_rpc_response(&rx, "waku-models", PI_RPC_TIMEOUT)
+    {
+        parse_droid_available_models(&response)
+    } else {
+        Vec::new()
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    models
+}
+
+fn recv_droid_rpc_response(rx: &Receiver<Value>, id: &str, timeout: Duration) -> Option<Value> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        let value = rx.recv_timeout(remaining).ok()?;
+        if value.get("type").and_then(Value::as_str) == Some("response")
+            && value.get("id").and_then(Value::as_str) == Some(id)
+        {
+            return (value.get("error").is_none()).then_some(value);
+        }
+    }
+}
+
+fn parse_droid_available_models(response: &Value) -> Vec<ProviderModel> {
+    response
+        .pointer("/result/availableModels")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            let id = value.get("id").and_then(Value::as_str)?;
+            if id.trim().is_empty() {
+                return None;
+            }
+            let name = value
+                .get("displayName")
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| display_name_from_slug(id));
+            let mut model = ProviderModel::new(id, name);
+            model.reasoning_efforts = value
+                .get("supportedReasoningEfforts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|effort| ProviderModelOption::new(effort, reasoning_effort_label(effort)))
+                .collect();
+            model.default_reasoning_effort = value
+                .get("defaultReasoningEffort")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            Some(model)
+        })
+        .collect()
 }
 
 fn discover_deepseek_catalog(
@@ -950,6 +1123,63 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "auto");
         assert!(models[0].is_default);
+    }
+
+    #[test]
+    fn droid_catalog_falls_back_to_the_cli_advertised_roster() {
+        let models = fallback_models(ProviderKind::Droid);
+        assert!(models.len() > 30);
+        assert_eq!(models[0].id, "auto");
+        assert_eq!(
+            models
+                .iter()
+                .find(|model| model.id == "claude-opus-5")
+                .map(|model| model.name.as_str()),
+            Some("Opus 5")
+        );
+        assert!(
+            models
+                .iter()
+                .find(|model| model.id == "claude-opus-5")
+                .is_some_and(|model| model.is_default)
+        );
+    }
+
+    #[test]
+    fn parses_droid_available_models_with_reasoning() {
+        let models = parse_droid_available_models(&json!({
+            "result": {
+                "sessionId": "abc",
+                "availableModels": [
+                    {
+                        "id": "claude-fable-5",
+                        "displayName": "Fable 5",
+                        "supportedReasoningEfforts": ["off", "low", "high"],
+                        "defaultReasoningEffort": "high"
+                    },
+                    {
+                        "id": "claude-haiku-4-5-20251001",
+                        "displayName": "Haiku 4.5",
+                        "supportedReasoningEfforts": []
+                    },
+                    {"id": "", "displayName": "Empty"}
+                ]
+            }
+        }));
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "claude-fable-5");
+        assert_eq!(models[0].name, "Fable 5");
+        assert_eq!(
+            models[0]
+                .reasoning_efforts
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["off", "low", "high"]
+        );
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("high"));
+        assert!(models[1].reasoning_efforts.is_empty());
     }
 
     #[test]

@@ -14,6 +14,7 @@ Waku works with:
 - Claude Code
 - Codex CLI
 - Cursor CLI
+- [Droid](https://docs.factory.ai/) (Factory)
 - Grok Build
 - OpenCode
 - Pi
